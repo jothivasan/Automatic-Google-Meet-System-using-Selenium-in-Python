@@ -1,0 +1,34 @@
+# Meeting Schedule Configuration
+# Format:
+#   - name: Meeting name/description
+#     link: Google Meet URL
+#     time: HH:MM (24-hour format)
+#     days: [MON, TUE, WED, THU, FRI, SAT, SUN]
+#     duration: Duration in minutes
+#     microphone: true/false
+#     camera: true/false
+
+meetings:
+  - name: "Daily Standup"
+    link: "https://meet.google.com/your-test-meeting"
+    time: "16:06"
+    days: [MON, TUE, WED, THU, FRI]
+    duration: 30
+    microphone: false
+    camera: false
+
+  - name: "Team Meeting"
+    link: "https://meet.google.com/your-test-meeting"
+    time: "16:04"
+    days: [MON]
+    duration: 60
+    microphone: true
+    camera: false
+
+  - name: "Weekly Review"
+    link: "https://meet.google.com/your-test-meeting"
+    time: "16:02"
+    days: [MON]
+    duration: 45
+    microphone: true
+    camera: true
