@@ -56,10 +56,13 @@ Automatic Google Meet System using Selenium in Python/
 
 ### Prerequisites
 
-- Python 3.8 or higher
-- Google Chrome browser installed
-- Google account credentials
-- Internet connection
+### Prerequisites
+
+- **OS:** Windows 10/11 (Primary), macOS, Linux
+- **Python:** Version 3.8 or higher
+- **Browser:** Google Chrome (Latest Version)
+- **Account:** Google account credentials (using a saved Chrome Profile is highly recommended)
+- **Permissions:** OS-level Microphone/Camera access enabled for desktop apps (Windows Privacy Settings)
 
 ### Installation
 
@@ -100,7 +103,16 @@ Automatic Google Meet System using Selenium in Python/
    pip install -r requirements.txt
    ```
 
-4. **Configure credentials**
+4. **Verify your system with Pre-Flight Check**
+
+   This system includes a diagnostic script to verify everything is set up correctly (Python version, dependencies, Chrome installation, `.env` structure, and OS privacy settings).
+   
+   ```bash
+   python preflight_check.py
+   ```
+   **Do not proceed unless all checks pass!**
+
+5. **Configure credentials**
 
    ```bash
    # Windows — copy the example environment file
@@ -117,10 +129,14 @@ Automatic Google Meet System using Selenium in Python/
    GOOGLE_PASSWORD=your-password
 
    # Recommended: set your Chrome profile path to bypass 2FA
-   # Windows: C:\Users\YourUsername\AppData\Local\Google\Chrome\User Data
-   chrome://version/
+   # Find your path by visiting chrome://version/ in Chrome
+   # IMPORTANT: Use the parent "User Data" directory, NOT the "Default" subfolder.
+   # Windows example: C:\Users\YourUsername\AppData\Local\Google\Chrome\User Data
    CHROME_USER_DATA_DIR=
    CHROME_PROFILE_DIRECTORY=Default
+
+   # Hardware Compatibility Toggle
+   USE_FAKE_MEDIA_DEVICE=True
    ```
 
 5. **Configure meetings** (optional, for scheduled mode)
@@ -173,6 +189,7 @@ GOOGLE_EMAIL=your-email@gmail.com
 GOOGLE_PASSWORD=your-password
 
 # Chrome Profile (RECOMMENDED — bypasses 2FA/CAPTCHA entirely)
+# IMPORTANT: Point to the "User Data" parent directory, NOT the profile subfolder.
 # Windows: C:\Users\YourUsername\AppData\Local\Google\Chrome\User Data
 # Mac:     ~/Library/Application Support/Google/Chrome
 # Linux:   ~/.config/google-chrome
@@ -182,6 +199,10 @@ CHROME_PROFILE_DIRECTORY=Default
 # Browser Settings
 HEADLESS_MODE=False          # Set to True for invisible browser
 BROWSER_TYPE=chrome
+
+# Hardware Compatibility
+USE_FAKE_MEDIA_DEVICE=True   # Set to True if attending silently (cross-machine reliable).
+                             # Set to False if you will speak/unmute during meetings.
 
 # Meeting Settings
 AUTO_LEAVE_DURATION=3600     # Default duration in seconds (1 hour)
@@ -298,24 +319,20 @@ Options:
 
 **Issue**: Login fails with 2-factor authentication
 
-- **Solution (Recommended)**: Set `CHROME_USER_DATA_DIR` in `.env` to your Chrome profile path — this loads your saved session and bypasses 2FA entirely.
-- **Alternative**: Use an app-specific password for credential-based login.
+- **Solution (Recommended)**: Set `CHROME_USER_DATA_DIR` in `.env` to your Chrome profile path — this loads your saved session and bypasses 2FA entirely. Make sure you point to the **User Data** folder, not the **Default** subfolder.
 
-**Issue**: Browser doesn't open
+**Issue**: Automation hangs, freezes, or fails to click mic/camera
 
-- **Solution**: Ensure Chrome is installed and up to date
+- **Solution**: Chrome's profile might be locked by another session. **Close ALL existing Chrome windows** before running the bot. The automation requires exclusive access to the browser profile.
 
-**Issue**: Can't find join button
+**Issue**: Microphone/camera toggles fail or buttons don't appear
 
-- **Solution**: Meeting may not have started yet, or link is invalid
-
-**Issue**: Microphone/camera controls don't work
-
-- **Solution**: Google Meet UI may have changed, check for updates
+- **Solution 1 (The easy fix)**: Set `USE_FAKE_MEDIA_DEVICE=True` in your `.env`. This forces a synthetic audio/video device, ensuring the Meet buttons always render and click properly, even on PCs with strict privacy settings or no hardware. NOTE: You will not be able to manually unmute and talk with this enabled (the fake device will send a test tone).
+- **Solution 2 (If you need real hardware)**: Check Windows Settings → Privacy & Security → Camera & Microphone. Ensure "Let desktop apps access your camera/microphone" is toggled **ON**. 
 
 **Issue**: `venv\Scripts\activate` is blocked on PowerShell
 
-- **Solution**: Run once in PowerShell: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, then retry.
+- **Solution**: Run once in an Admin PowerShell: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, then retry.
 
 ## 📝 Logging
 

@@ -13,6 +13,11 @@ import logging
 import argparse
 from colorama import init, Fore, Style
 
+# Fix Windows console encoding for emojis
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # Add src directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
@@ -30,7 +35,10 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'meet_automation.log')),
+        logging.FileHandler(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'meet_automation.log'),
+            encoding='utf-8'
+        ),
         logging.StreamHandler()
     ]
 )
@@ -69,6 +77,7 @@ class GoogleMeetAutomation:
                 browser_type=self.config.get('browser_type', 'chrome'),
                 user_data_dir=self.config.get('chrome_user_data_dir'),
                 profile_directory=self.config.get('chrome_profile_directory', 'Default'),
+                use_fake_media_device=self.config.get('use_fake_media_device', True),
             )
             self.driver = self.browser_manager.initialize_browser()
 

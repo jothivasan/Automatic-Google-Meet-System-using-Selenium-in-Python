@@ -61,6 +61,7 @@ class ConfigLoader:
                 self.config['auto_leave_duration'] = 3600
             self.config['microphone_on'] = os.getenv('MICROPHONE_ON', 'False').lower() == 'true'
             self.config['camera_on'] = os.getenv('CAMERA_ON', 'False').lower() == 'true'
+            self.config['use_fake_media_device'] = os.getenv('USE_FAKE_MEDIA_DEVICE', 'True').lower() == 'true'
 
             return self.config
 

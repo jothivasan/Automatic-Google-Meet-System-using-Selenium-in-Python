@@ -1,17 +1,25 @@
 """
 Google Meet Automation Module
 Handles joining, controlling, and leaving Google Meet meetings.
+
+Cross-system compatibility: All mic/camera controls use multiple
+fallback strategies (attribute check → aria-label → keyboard shortcut)
+to work consistently regardless of Chrome version, OS language, hardware
+availability, or system privacy settings.
 """
 
+import time
 import logging
 import threading
 from urllib.parse import urlparse
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import (
     TimeoutException, NoSuchElementException, InvalidSessionIdException,
-    WebDriverException,
+    WebDriverException, StaleElementReferenceException,
 )
 from colorama import Fore, Style
 
@@ -24,24 +32,33 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _MIC_SELECTORS = [
+    # Most reliable: attribute-based (language-independent)
+    (By.CSS_SELECTOR, "button[data-is-muted]"),
     (By.XPATH, "//button[@data-is-muted]"),
+    # aria-label partial matches (case-insensitive)
+    (By.CSS_SELECTOR, "button[aria-label*='microphone' i]"),
+    (By.CSS_SELECTOR, "button[aria-label*='mic' i]"),
+    # data-tooltip partial matches (case-insensitive)
+    (By.CSS_SELECTOR, "button[data-tooltip*='microphone' i]"),
+    # Explicit English text matches
     (By.XPATH, "//button[contains(@aria-label, 'microphone')]"),
     (By.XPATH, "//button[contains(@aria-label, 'mic')]"),
     (By.XPATH, "//button[@data-tooltip='Turn off microphone']"),
     (By.XPATH, "//button[@data-tooltip='Turn on microphone']"),
+    # Internal jsname (may change with Google updates)
     (By.XPATH, "//button[@jsname='BOHk2e']"),
-    (By.CSS_SELECTOR, "button[data-tooltip*='microphone' i]"),
-    (By.CSS_SELECTOR, "button[aria-label*='microphone' i]"),
-    (By.CSS_SELECTOR, "button[aria-label*='mic' i]"),
 ]
 
 _CAMERA_SELECTORS = [
+    # aria-label partial matches (case-insensitive, language-resilient)
+    (By.CSS_SELECTOR, "button[aria-label*='camera' i]"),
+    (By.CSS_SELECTOR, "button[data-tooltip*='camera' i]"),
+    # Explicit English text matches
     (By.XPATH, "//button[contains(@aria-label, 'camera')]"),
     (By.XPATH, "//button[@data-tooltip='Turn off camera']"),
     (By.XPATH, "//button[@data-tooltip='Turn on camera']"),
+    # Internal jsname
     (By.XPATH, "//button[@jsname='R3Oird']"),
-    (By.CSS_SELECTOR, "button[data-tooltip*='camera' i]"),
-    (By.CSS_SELECTOR, "button[aria-label*='camera' i]"),
 ]
 
 _JOIN_SELECTORS = [
@@ -82,6 +99,9 @@ _GOODBYE_SELECTORS = [
     (By.XPATH, "//button[contains(text(), 'Rejoin')]"),
     (By.XPATH, "//button[contains(text(), 'Return to home')]"),
 ]
+
+# Maximum retries for toggling mic/camera
+_TOGGLE_MAX_RETRIES = 3
 
 
 class MeetAutomation:
@@ -156,7 +176,7 @@ class MeetAutomation:
                 continue
         return False
 
-    def _wait_for_prejoin_screen(self, timeout=20):
+    def _wait_for_prejoin_screen(self, timeout=30):
         """Wait until any pre-join element becomes visible — single combined wait."""
         def any_visible(driver):
             for by, selector in _PREJOIN_READY_SELECTORS:
@@ -170,6 +190,9 @@ class MeetAutomation:
 
         try:
             WebDriverWait(self.driver, timeout).until(any_visible)
+            # Extra settle time for slower machines — elements may be in DOM
+            # but animations/overlays haven't finished yet
+            time.sleep(2)
             return True
         except TimeoutException:
             return False
@@ -181,6 +204,200 @@ class MeetAutomation:
             return True
         except (InvalidSessionIdException, WebDriverException):
             return False
+
+    def _safe_click(self, element):
+        """
+        Click an element with fallback to JS click if a normal click is
+        intercepted by an overlay or animation.
+        """
+        try:
+            element.click()
+        except (WebDriverException, StaleElementReferenceException):
+            try:
+                self.driver.execute_script("arguments[0].click()", element)
+            except Exception:
+                pass
+
+    def _save_debug_screenshot(self, name):
+        """Save a screenshot for debugging cross-machine issues."""
+        try:
+            import os
+            screenshots_dir = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "screenshots"
+            )
+            os.makedirs(screenshots_dir, exist_ok=True)
+            path = os.path.join(screenshots_dir, f"{name}.png")
+            self.driver.save_screenshot(path)
+            logger.info(f"{Fore.CYAN}Debug screenshot saved: {path}{Style.RESET_ALL}")
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Mic / Camera status detection (multi-strategy, language-agnostic)
+    # ------------------------------------------------------------------
+
+    def _get_mic_status(self):
+        """
+        Return True if mic is currently ON, False if muted.
+
+        Uses multiple detection strategies for cross-system reliability:
+        1. data-is-muted attribute (language-independent, most reliable)
+        2. aria-label substring check (works for English UIs)
+        3. data-tooltip substring check
+        """
+        try:
+            btn = self._find_element(_MIC_SELECTORS, timeout=5)
+            if btn is None:
+                logger.warning(f"{Fore.YELLOW}Mic button not found in DOM{Style.RESET_ALL}")
+                return None  # Unknown — button not found
+
+            # Strategy 1: data-is-muted attribute (best — language-independent)
+            data_is_muted = btn.get_attribute("data-is-muted")
+            if data_is_muted is not None:
+                is_on = data_is_muted.lower() == "false"
+                logger.debug(f"Mic status via data-is-muted: {'ON' if is_on else 'OFF'}")
+                return is_on
+
+            # Strategy 2: aria-label (covers most English-locale Chrome)
+            aria_label = (btn.get_attribute("aria-label") or "").lower()
+            if "turn on" in aria_label or "unmute" in aria_label:
+                return False  # Currently OFF (label says "turn on")
+            if "turn off" in aria_label or "mute" in aria_label:
+                return True   # Currently ON (label says "turn off")
+
+            # Strategy 3: data-tooltip
+            data_tooltip = (btn.get_attribute("data-tooltip") or "").lower()
+            if "turn on" in data_tooltip:
+                return False
+            if "turn off" in data_tooltip:
+                return True
+
+            # Fallback: assume mic is ON (safer — will attempt to mute)
+            logger.warning(f"{Fore.YELLOW}Could not determine mic state, assuming ON{Style.RESET_ALL}")
+            return True
+
+        except (StaleElementReferenceException, WebDriverException):
+            return None
+        except Exception:
+            return None
+
+    def _get_camera_status(self):
+        """
+        Return True if camera is currently ON, False if off.
+
+        Uses multiple detection strategies for cross-system reliability.
+        """
+        try:
+            btn = self._find_element(_CAMERA_SELECTORS, timeout=5)
+            if btn is None:
+                logger.warning(f"{Fore.YELLOW}Camera button not found in DOM{Style.RESET_ALL}")
+                return None  # Unknown
+
+            # Strategy 1: aria-label
+            aria_label = (btn.get_attribute("aria-label") or "").lower()
+            if "turn on" in aria_label:
+                return False
+            if "turn off" in aria_label:
+                return True
+
+            # Strategy 2: data-tooltip
+            data_tooltip = (btn.get_attribute("data-tooltip") or "").lower()
+            if "turn on" in data_tooltip:
+                return False
+            if "turn off" in data_tooltip:
+                return True
+
+            # Fallback: assume camera is ON
+            logger.warning(f"{Fore.YELLOW}Could not determine camera state, assuming ON{Style.RESET_ALL}")
+            return True
+
+        except (StaleElementReferenceException, WebDriverException):
+            return None
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
+    # Mic / Camera toggling (multi-fallback with verification)
+    # ------------------------------------------------------------------
+
+    def _toggle_microphone(self):
+        """
+        Toggle the microphone button.
+        Falls back to keyboard shortcut (Ctrl+D) if button click fails.
+        """
+        # Strategy 1: Click the button
+        btn = self._find_clickable(_MIC_SELECTORS, timeout=5)
+        if btn:
+            self._safe_click(btn)
+            time.sleep(0.5)
+            return True
+
+        # Strategy 2: Keyboard shortcut Ctrl+D (Google Meet mic toggle)
+        logger.info(f"{Fore.YELLOW}Mic button not clickable, trying Ctrl+D shortcut{Style.RESET_ALL}")
+        try:
+            ActionChains(self.driver).key_down(Keys.CONTROL).send_keys('d').key_up(Keys.CONTROL).perform()
+            time.sleep(0.5)
+            return True
+        except Exception as e:
+            logger.warning(f"{Fore.YELLOW}Keyboard shortcut failed: {e}{Style.RESET_ALL}")
+
+        # Strategy 3: JavaScript click
+        logger.info(f"{Fore.YELLOW}Trying JS-based mic toggle{Style.RESET_ALL}")
+        try:
+            script = """
+            var btns = document.querySelectorAll('button[data-is-muted], button[aria-label*="microphone" i], button[aria-label*="mic" i]');
+            if (btns.length > 0) { btns[0].click(); return true; }
+            return false;
+            """
+            result = self.driver.execute_script(script)
+            if result:
+                time.sleep(0.5)
+                return True
+        except Exception:
+            pass
+
+        logger.warning(f"{Fore.YELLOW}Could not toggle microphone by any method{Style.RESET_ALL}")
+        return False
+
+    def _toggle_camera(self):
+        """
+        Toggle the camera button.
+        Falls back to keyboard shortcut (Ctrl+E) if button click fails.
+        """
+        # Strategy 1: Click the button
+        btn = self._find_clickable(_CAMERA_SELECTORS, timeout=5)
+        if btn:
+            self._safe_click(btn)
+            time.sleep(0.5)
+            return True
+
+        # Strategy 2: Keyboard shortcut Ctrl+E (Google Meet camera toggle)
+        logger.info(f"{Fore.YELLOW}Camera button not clickable, trying Ctrl+E shortcut{Style.RESET_ALL}")
+        try:
+            ActionChains(self.driver).key_down(Keys.CONTROL).send_keys('e').key_up(Keys.CONTROL).perform()
+            time.sleep(0.5)
+            return True
+        except Exception as e:
+            logger.warning(f"{Fore.YELLOW}Keyboard shortcut failed: {e}{Style.RESET_ALL}")
+
+        # Strategy 3: JavaScript click
+        logger.info(f"{Fore.YELLOW}Trying JS-based camera toggle{Style.RESET_ALL}")
+        try:
+            script = """
+            var btns = document.querySelectorAll('button[aria-label*="camera" i], button[data-tooltip*="camera" i]');
+            if (btns.length > 0) { btns[0].click(); return true; }
+            return false;
+            """
+            result = self.driver.execute_script(script)
+            if result:
+                time.sleep(0.5)
+                return True
+        except Exception:
+            pass
+
+        logger.warning(f"{Fore.YELLOW}Could not toggle camera by any method{Style.RESET_ALL}")
+        return False
 
     # ------------------------------------------------------------------
     # Public API
@@ -210,6 +427,7 @@ class MeetAutomation:
             # Wait for the pre-join lobby to render instead of a blind sleep
             if not self._wait_for_prejoin_screen():
                 logger.warning(f"{Fore.YELLOW}⚠ Pre-join screen took too long to load{Style.RESET_ALL}")
+                self._save_debug_screenshot("prejoin_timeout")
 
             self._check_meeting_status()
             self._dismiss_popups()
@@ -229,10 +447,12 @@ class MeetAutomation:
                 return True
 
             logger.error(f"{Fore.RED}✗ Failed to join the meeting{Style.RESET_ALL}")
+            self._save_debug_screenshot("join_failed")
             return False
 
         except Exception as e:
             logger.error(f"{Fore.RED}✗ Error joining meeting: {str(e)}{Style.RESET_ALL}")
+            self._save_debug_screenshot("join_error")
             return False
 
     def _validate_meet_link(self, link):
@@ -269,79 +489,121 @@ class MeetAutomation:
     def _set_audio_video(self, microphone_on, camera_on):
         """
         Set microphone and camera state before joining.
-        Waits for the controls to appear before interacting.
+        Uses multi-strategy detection and toggling with verification.
         """
         try:
-            # Non-blocking poll inside WebDriverWait — no nested waits
-            WebDriverWait(self.driver, 10).until(
-                lambda d: self._any_element_present(_MIC_SELECTORS)
-                or self._any_element_present(_CAMERA_SELECTORS)
-            )
+            # Wait for at least one media control to appear
+            try:
+                WebDriverWait(self.driver, 15).until(
+                    lambda d: self._any_element_present(_MIC_SELECTORS)
+                    or self._any_element_present(_CAMERA_SELECTORS)
+                )
+            except TimeoutException:
+                logger.warning(f"{Fore.YELLOW}⚠ Media controls did not appear in time{Style.RESET_ALL}")
+                self._save_debug_screenshot("no_media_controls")
 
-            mic_status = self._get_mic_status()
-            if mic_status != microphone_on:
-                self._toggle_microphone()
-                logger.info(f"{Fore.CYAN}Microphone: {'ON' if microphone_on else 'OFF'}{Style.RESET_ALL}")
+            # Extra settle time for the controls to become fully interactive
+            time.sleep(1)
 
-            camera_status = self._get_camera_status()
-            if camera_status != camera_on:
-                self._toggle_camera()
-                logger.info(f"{Fore.CYAN}Camera: {'ON' if camera_on else 'OFF'}{Style.RESET_ALL}")
+            # --- Microphone ---
+            self._set_mic_state(microphone_on)
 
-        except (InvalidSessionIdException, WebDriverException) as e:
-            # Session is unrecoverable — propagate so join_meeting can abort cleanly
+            # --- Camera ---
+            self._set_camera_state(camera_on)
+
+        except (InvalidSessionIdException, WebDriverException):
+            # Session is unrecoverable — propagate so join_meeting can abort
             raise
         except Exception as e:
             logger.warning(f"{Fore.YELLOW}Could not set audio/video: {str(e)}{Style.RESET_ALL}")
 
-    def _get_mic_status(self):
-        """Return True if mic is currently on, False if muted."""
-        try:
-            btn = self._find_element(_MIC_SELECTORS, timeout=3)
-            if btn is None:
-                return False
-            aria_label = btn.get_attribute("aria-label") or ""
-            data_tooltip = btn.get_attribute("data-tooltip") or ""
-            return "Turn on" not in aria_label and "Turn on" not in data_tooltip
-        except Exception:
-            return False
+    def _set_mic_state(self, desired_on):
+        """
+        Ensure the microphone matches the desired state, with retry.
 
-    def _get_camera_status(self):
-        """Return True if camera is currently on, False if off."""
-        try:
-            btn = self._find_element(_CAMERA_SELECTORS, timeout=3)
-            if btn is None:
-                return False
-            aria_label = btn.get_attribute("aria-label") or ""
-            data_tooltip = btn.get_attribute("data-tooltip") or ""
-            return "Turn on" not in aria_label and "Turn on" not in data_tooltip
-        except Exception:
-            return False
+        Args:
+            desired_on (bool): True = microphone should be ON, False = should be muted
+        """
+        for attempt in range(1, _TOGGLE_MAX_RETRIES + 1):
+            current = self._get_mic_status()
 
-    def _toggle_microphone(self):
-        """Click the microphone toggle button."""
-        try:
-            btn = self._find_clickable(_MIC_SELECTORS, timeout=5)
-            if btn:
-                btn.click()
-                # Wait for the button to become clickable again (state has updated)
-                self._find_clickable(_MIC_SELECTORS, timeout=3)
-            else:
-                logger.warning(f"{Fore.YELLOW}Could not find microphone button{Style.RESET_ALL}")
-        except Exception as e:
-            logger.warning(f"{Fore.YELLOW}Could not toggle microphone: {str(e)}{Style.RESET_ALL}")
+            if current is None:
+                logger.warning(
+                    f"{Fore.YELLOW}Mic status unknown (attempt {attempt}/{_TOGGLE_MAX_RETRIES}), "
+                    f"attempting toggle anyway{Style.RESET_ALL}"
+                )
+                self._toggle_microphone()
+                time.sleep(1)
+                continue
 
-    def _toggle_camera(self):
-        """Click the camera toggle button."""
-        try:
-            btn = self._find_clickable(_CAMERA_SELECTORS, timeout=5)
-            if btn:
-                btn.click()
-                self._find_clickable(_CAMERA_SELECTORS, timeout=3)
-            else:
-                logger.warning(f"{Fore.YELLOW}Could not find camera button{Style.RESET_ALL}")
-        except Exception as e:
-            logger.warning(f"{Fore.YELLOW}Could not toggle camera: {str(e)}{Style.RESET_ALL}")
+            if current == desired_on:
+                state_label = "ON" if desired_on else "OFF"
+                logger.info(f"{Fore.GREEN}✓ Microphone already {state_label}{Style.RESET_ALL}")
+                return True
+
+            # Current state doesn't match desired — toggle
+            logger.info(
+                f"{Fore.CYAN}Toggling microphone from "
+                f"{'ON' if current else 'OFF'} → {'ON' if desired_on else 'OFF'} "
+                f"(attempt {attempt}/{_TOGGLE_MAX_RETRIES}){Style.RESET_ALL}"
+            )
+            self._toggle_microphone()
+            time.sleep(1)  # Wait for state to settle
+
+            # Verify the toggle worked
+            new_status = self._get_mic_status()
+            if new_status == desired_on:
+                logger.info(f"{Fore.GREEN}✓ Microphone set to {'ON' if desired_on else 'OFF'}{Style.RESET_ALL}")
+                return True
+
+            logger.warning(f"{Fore.YELLOW}Mic toggle verification failed (attempt {attempt}){Style.RESET_ALL}")
+
+        logger.error(f"{Fore.RED}✗ Failed to set microphone state after {_TOGGLE_MAX_RETRIES} attempts{Style.RESET_ALL}")
+        self._save_debug_screenshot("mic_toggle_failed")
+        return False
+
+    def _set_camera_state(self, desired_on):
+        """
+        Ensure the camera matches the desired state, with retry.
+
+        Args:
+            desired_on (bool): True = camera should be ON, False = should be off
+        """
+        for attempt in range(1, _TOGGLE_MAX_RETRIES + 1):
+            current = self._get_camera_status()
+
+            if current is None:
+                logger.warning(
+                    f"{Fore.YELLOW}Camera status unknown (attempt {attempt}/{_TOGGLE_MAX_RETRIES}), "
+                    f"attempting toggle anyway{Style.RESET_ALL}"
+                )
+                self._toggle_camera()
+                time.sleep(1)
+                continue
+
+            if current == desired_on:
+                state_label = "ON" if desired_on else "OFF"
+                logger.info(f"{Fore.GREEN}✓ Camera already {state_label}{Style.RESET_ALL}")
+                return True
+
+            logger.info(
+                f"{Fore.CYAN}Toggling camera from "
+                f"{'ON' if current else 'OFF'} → {'ON' if desired_on else 'OFF'} "
+                f"(attempt {attempt}/{_TOGGLE_MAX_RETRIES}){Style.RESET_ALL}"
+            )
+            self._toggle_camera()
+            time.sleep(1)
+
+            new_status = self._get_camera_status()
+            if new_status == desired_on:
+                logger.info(f"{Fore.GREEN}✓ Camera set to {'ON' if desired_on else 'OFF'}{Style.RESET_ALL}")
+                return True
+
+            logger.warning(f"{Fore.YELLOW}Camera toggle verification failed (attempt {attempt}){Style.RESET_ALL}")
+
+        logger.error(f"{Fore.RED}✗ Failed to set camera state after {_TOGGLE_MAX_RETRIES} attempts{Style.RESET_ALL}")
+        self._save_debug_screenshot("camera_toggle_failed")
+        return False
 
     def _dismiss_popups(self):
         """Dismiss any popups or permission dialogs."""
@@ -355,7 +617,6 @@ class MeetAutomation:
             try:
                 btn = self.driver.find_element(by, selector)
                 btn.click()
-                # Brief wait for the dialog to close before checking the next one
                 WebDriverWait(self.driver, 2).until(EC.staleness_of(btn))
             except (NoSuchElementException, TimeoutException):
                 continue
@@ -407,10 +668,7 @@ class MeetAutomation:
 
             # Try a normal click first; fall back to JS click if an overlay
             # or animation intercepts the event.
-            try:
-                btn.click()
-            except WebDriverException:
-                self.driver.execute_script("arguments[0].click()", btn)
+            self._safe_click(btn)
 
             logger.info(f"{Fore.GREEN}✓ Join button clicked{Style.RESET_ALL}")
             # Wait for the leave button to appear (confirms we entered the meeting)
@@ -443,7 +701,7 @@ class MeetAutomation:
 
             btn = self._find_clickable(_LEAVE_SELECTORS, timeout=10)
             if btn:
-                btn.click()
+                self._safe_click(btn)
                 logger.info(f"{Fore.GREEN}✓ Successfully left the meeting{Style.RESET_ALL}")
                 with self._joined_lock:
                     self.meeting_joined = False

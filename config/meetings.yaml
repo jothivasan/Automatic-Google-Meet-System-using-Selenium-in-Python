@@ -11,9 +11,9 @@
 meetings:
   - name: "Daily Standup"
     link: "https://meet.google.com/your-test-meeting"
-    time: "16:06"
-    days: [MON, TUE, WED, THU, FRI]
-    duration: 30
+    time: "11:31"
+    days: [MON, TUE, WED, THU, FRI, SUN]
+    duration: 1
     microphone: false
     camera: false
 

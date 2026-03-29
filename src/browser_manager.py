@@ -12,6 +12,11 @@ from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
 from colorama import Fore, Style
 
+try:
+    from selenium_stealth import stealth as _apply_stealth
+except ImportError:
+    _apply_stealth = None
+
 logger = logging.getLogger(__name__)
 
 _CHROMEDRIVER_NAME = "chromedriver.exe" if platform.system() == "Windows" else "chromedriver"
@@ -24,7 +29,8 @@ class BrowserManager:
     """
 
     def __init__(self, headless=False, browser_type="chrome",
-                 user_data_dir=None, profile_directory=None):
+                 user_data_dir=None, profile_directory=None,
+                 use_fake_media_device=True):
         """
         Initialize the Browser Manager.
 
@@ -33,11 +39,16 @@ class BrowserManager:
             browser_type (str): Type of browser to use (currently supports 'chrome')
             user_data_dir (str): Path to Chrome user data directory for saved profile login
             profile_directory (str): Chrome profile folder name (e.g. 'Default')
+            use_fake_media_device (bool): If True, use synthetic test device for mic/camera
+                (guarantees buttons always appear but no real audio/video).
+                If False, use real hardware (you can talk/show video, but buttons
+                may not appear on PCs without mic/camera).
         """
         self.headless = headless
         self.browser_type = browser_type.lower()
         self.user_data_dir = user_data_dir
         self.profile_directory = profile_directory or "Default"
+        self.use_fake_media_device = use_fake_media_device
         self.driver = None
         logger.info(f"{Fore.CYAN}Initializing Browser Manager...{Style.RESET_ALL}")
 
@@ -50,7 +61,7 @@ class BrowserManager:
         """
         chrome_options = Options()
 
-        # Performance optimizations
+        # Anti-detection: hide automation signature
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
         chrome_options.add_experimental_option('useAutomationExtension', False)
@@ -68,18 +79,34 @@ class BrowserManager:
         chrome_options.add_argument("--no-default-browser-check")
         chrome_options.add_argument("--disable-default-apps")
 
-        # Auto-grant media permission dialogs so Chrome does not show the
-        # "allow microphone / camera" popup.
-        # NOTE: --use-fake-device-for-media-stream is intentionally omitted.
-        # That flag replaces real mic/camera with test signals, which means
-        # no real audio or video would be transmitted in the meeting.
+        # Force English locale so that aria-label / data-tooltip selectors
+        # match consistently regardless of the system or account language.
+        chrome_options.add_argument("--lang=en-US")
+
+        # Auto-grant media permission popups (always needed)
         chrome_options.add_argument("--use-fake-ui-for-media-stream")
 
-        # Set preferences
+        # Fake device: provides a synthetic test-pattern device even when
+        # the machine has no physical mic/camera (or the OS blocks access).
+        # Without this, Chrome may render the pre-join lobby without
+        # mic/camera toggle buttons on hardware-less or locked-down PCs.
+        #
+        # Trade-off: with fake device ON you cannot use real mic/camera.
+        # Controlled via USE_FAKE_MEDIA_DEVICE in .env
+        if self.use_fake_media_device:
+            chrome_options.add_argument("--use-fake-device-for-media-stream")
+            logger.info(f"{Fore.CYAN}Using fake media device (no real mic/camera){Style.RESET_ALL}")
+        else:
+            logger.info(f"{Fore.CYAN}Using real media devices (mic/camera){Style.RESET_ALL}")
+
+        # Set preferences — force-allow mic/camera at the profile level
         prefs = {
             "profile.default_content_setting_values.media_stream_mic": 1,
             "profile.default_content_setting_values.media_stream_camera": 1,
-            "profile.default_content_setting_values.notifications": 2
+            "profile.default_content_setting_values.notifications": 2,
+            # Clear any per-site overrides that might deny meet.google.com
+            "profile.content_settings.exceptions.media_stream_mic": {},
+            "profile.content_settings.exceptions.media_stream_camera": {},
         }
         chrome_options.add_experimental_option("prefs", prefs)
 
@@ -156,6 +183,21 @@ class BrowserManager:
                         f"Failed to start Chrome browser. Error: {str(e)}. "
                         f"Please ensure Chrome browser is installed and ChromeDriver is compatible."
                     )
+
+                # Apply selenium-stealth to further hide automation signature
+                if _apply_stealth is not None:
+                    try:
+                        _apply_stealth(
+                            self.driver,
+                            languages=["en-US", "en"],
+                            vendor="Google Inc.",
+                            platform="Win32",
+                            webgl_vendor="Intel Inc.",
+                            renderer="Intel Iris OpenGL Engine",
+                            fix_hairline=True,
+                        )
+                    except Exception:
+                        pass  # stealth is best-effort
 
                 # Maximize window for better element visibility
                 if not self.headless:
