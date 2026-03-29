@@ -21,6 +21,17 @@ class GoogleAuthenticator:
     credential-based login only when not already authenticated.
     """
 
+    # Known Google domains that confirm a logged-in session
+    _LOGGED_IN_DOMAINS = (
+        "myaccount.google.com",
+        "mail.google.com",
+        "calendar.google.com",
+        "meet.google.com",
+        "drive.google.com",
+        "google.com/webhp",
+        "google.com/?",
+    )
+
     def __init__(self, driver, email, password):
         """
         Initialize the Google Authenticator.
@@ -114,19 +125,14 @@ class GoogleAuthenticator:
     def _verify_login(self):
         """
         Verify login success by requiring a confirmed redirect to a known
-        post-login Google domain.  Returns False when stuck on 2FA/challenge.
+        post-login Google domain. Returns False when stuck on 2FA/challenge.
 
         Returns:
             bool: True if login successful, False otherwise
         """
-        _SUCCESS_DOMAINS = (
-            "myaccount.google.com", "mail.google.com",
-            "calendar.google.com", "meet.google.com",
-            "drive.google.com",
-        )
         try:
             WebDriverWait(self.driver, 10).until(
-                lambda d: any(domain in d.current_url for domain in _SUCCESS_DOMAINS)
+                lambda d: any(domain in d.current_url for domain in self._LOGGED_IN_DOMAINS)
             )
             return True
 
@@ -136,7 +142,7 @@ class GoogleAuthenticator:
             if "challenge" in current_url or "signin" in current_url:
                 return False
             # Landed on some other Google page → treat as success
-            return any(domain in current_url for domain in _SUCCESS_DOMAINS)
+            return any(domain in current_url for domain in self._LOGGED_IN_DOMAINS)
         except Exception as e:
             logger.warning(f"{Fore.YELLOW}Could not verify login: {str(e)}{Style.RESET_ALL}")
             return False
@@ -144,25 +150,45 @@ class GoogleAuthenticator:
     def is_logged_in(self):
         """
         Check whether the browser is already logged in to a Google account.
-        Uses a short timeout to avoid blocking when no session exists.
+
+        ✅ Fix: First checks the CURRENT page URL before navigating anywhere.
+        This avoids unnecessary navigation to accounts.google.com which:
+          - Wastes 5-10 seconds per meeting start
+          - Can trigger Google's security check on automated browsers
+          - Was causing "Couldn't sign you in" errors
 
         Returns:
             bool: True if logged in, False otherwise
         """
         try:
-            self.driver.get("https://accounts.google.com/")
+            # ✅ Step 1: Check current URL first — no navigation needed
+            # if Chrome profile already loaded a Google page
+            current_url = self.driver.current_url
+            if any(domain in current_url for domain in self._LOGGED_IN_DOMAINS):
+                logger.info(f"{Fore.GREEN}✓ Already logged in (detected from current page){Style.RESET_ALL}")
+                return True
 
-            # A logged-in session redirects to myaccount.google.com
-            WebDriverWait(self.driver, 5).until(
+            # ✅ Step 2: Only navigate if not already on a known Google page
+            # Use a lightweight Google page instead of accounts.google.com
+            # to avoid triggering security checks
+            logger.info(f"{Fore.CYAN}Checking login status...{Style.RESET_ALL}")
+            self.driver.get("https://myaccount.google.com/")
+
+            WebDriverWait(self.driver, 8).until(
                 lambda d: "myaccount.google.com" in d.current_url
                 or "/signin" in d.current_url
                 or "/ServiceLogin" in d.current_url
+                or "accounts.google.com" in d.current_url
             )
 
-            if "myaccount.google.com" in self.driver.current_url:
+            current_url = self.driver.current_url
+
+            if "myaccount.google.com" in current_url:
                 logger.info(f"{Fore.GREEN}✓ Already logged in{Style.RESET_ALL}")
                 return True
 
+            # Redirected to sign-in page — not logged in
+            logger.info(f"{Fore.CYAN}Not logged in, will attempt credential login{Style.RESET_ALL}")
             return False
 
         except TimeoutException:

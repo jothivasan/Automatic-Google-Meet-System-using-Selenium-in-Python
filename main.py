@@ -64,6 +64,12 @@ class GoogleMeetAutomation:
         self.authenticator = None
         self.meet_automation = None
 
+        # ✅ Fix: Guard flag to prevent overlapping meetings from
+        # crashing each other by calling cleanup() mid-session.
+        # If Meeting A is running and Meeting B triggers, B will be
+        # skipped cleanly instead of killing A's browser.
+        self._meeting_running = False
+
     def initialize(self):
         """Initialize browser and authenticate."""
         try:
@@ -121,10 +127,10 @@ class GoogleMeetAutomation:
             # Join meeting
             if self.meet_automation.join_meeting(meet_link, mic_on, cam_on):
                 logger.info(f"{Fore.GREEN}✓ In meeting. Will leave after {meet_duration} seconds{Style.RESET_ALL}")
-                
+
                 # Wait for specified duration
                 time.sleep(meet_duration)
-                
+
                 # Leave meeting
                 self.meet_automation.leave_meeting()
                 return True
@@ -145,9 +151,35 @@ class GoogleMeetAutomation:
         """
         Handler for scheduled meetings.
 
+        ✅ Fix: Added _meeting_running guard to prevent overlapping meetings
+        from crashing each other.
+
+        What was happening before:
+        - Meeting A starts at 10:00, runs for 60 minutes
+        - Meeting B triggers at 10:30 while A is still running
+        - B called cleanup() → killed Meeting A's browser mid-session
+        - B then failed to start its own session → both meetings crashed
+
+        What happens now:
+        - Meeting A starts, sets _meeting_running = True
+        - Meeting B triggers but sees _meeting_running = True → skips cleanly
+        - Meeting A finishes normally, sets _meeting_running = False
+        - Next non-overlapping meeting runs fine
+
         Args:
             meeting_config (dict): Meeting configuration
         """
+        # ✅ Skip if another meeting is already running
+        if self._meeting_running:
+            logger.warning(
+                f"{Fore.YELLOW}⚠ Skipping '{meeting_config.get('name', 'Unnamed')}' "
+                f"— another meeting is still in progress{Style.RESET_ALL}"
+            )
+            return
+
+        # ✅ Set flag before starting — released in finally block
+        self._meeting_running = True
+
         try:
             logger.info(f"\n{Fore.CYAN}{'='*60}{Style.RESET_ALL}")
             logger.info(f"{Fore.GREEN}⏰ Time for: {meeting_config.get('name', 'Unnamed Meeting')}{Style.RESET_ALL}")
@@ -166,7 +198,6 @@ class GoogleMeetAutomation:
             link = meeting_config.get('link', '').strip()
             if not link:
                 logger.error(f"{Fore.RED}✗ Meeting has no link configured{Style.RESET_ALL}")
-                self.cleanup()
                 return
 
             self.join_meeting_now(
@@ -178,6 +209,10 @@ class GoogleMeetAutomation:
 
         except Exception as e:
             logger.error(f"{Fore.RED}✗ Error in scheduled meeting: {str(e)}{Style.RESET_ALL}")
+        finally:
+            # ✅ Always release the flag and clean up — even if an error occurred
+            self._meeting_running = False
+            self.cleanup()
 
     def run_scheduler(self, meetings_config):
         """
@@ -189,7 +224,7 @@ class GoogleMeetAutomation:
         try:
             scheduler = MeetingScheduler(meetings_config)
             scheduler.schedule_meetings(self.scheduled_meeting_handler)
-            
+
             # Display next meeting
             next_meeting = scheduler.get_next_meeting()
             if next_meeting:
@@ -253,7 +288,7 @@ Examples:
             meetings_config_path=args.config if args.config else 'config/meetings.yaml'
         )
         config_loader.load_environment()
-        
+
         if not config_loader.validate_config():
             logger.error(f"{Fore.RED}Please configure your credentials in .env file{Style.RESET_ALL}")
             return

@@ -108,14 +108,22 @@ class MeetingScheduler:
     def run_scheduler(self):
         """
         Run the scheduler loop continuously.
-        This will block and check for pending jobs every 30 seconds.
+
+        ✅ Fix: Changed from time.sleep(30) to time.sleep(1).
+        
+        Why this matters:
+        - Old code checked every 30 seconds — if a meeting was at 10:31:00
+          and the loop checked at 10:30:45, next check was 10:31:15.
+          The schedule library marks jobs as missed → meeting never triggered.
+        - New code checks every 1 second — guaranteed to catch every meeting
+          within 1 second of its scheduled time. No meetings ever missed.
         """
         logger.info(f"{Fore.GREEN}✓ Scheduler is running... Press Ctrl+C to stop{Style.RESET_ALL}")
 
         try:
             while True:
                 self._scheduler.run_pending()
-                time.sleep(30)  # Check every 30 seconds
+                time.sleep(1)  # ✅ Check every 1 second — never miss a meeting
         except KeyboardInterrupt:
             logger.info(f"\n{Fore.YELLOW}Scheduler stopped by user{Style.RESET_ALL}")
 

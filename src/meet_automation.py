@@ -128,43 +128,65 @@ class MeetAutomation:
 
     def _find_element(self, selectors, timeout=5):
         """
-        Try each (By, selector) pair in order and return the first element found.
+        Scan ALL selectors in parallel within a single WebDriverWait.
+        Returns the first matching element found within timeout seconds.
+        Much faster than sequential per-selector waits.
 
         Args:
             selectors: list of (By, selector_string) tuples
-            timeout (int): per-selector wait in seconds
+            timeout (int): total wait in seconds across ALL selectors
 
         Returns:
             WebElement or None
         """
-        for by, selector in selectors:
-            try:
-                return WebDriverWait(self.driver, timeout).until(
-                    EC.presence_of_element_located((by, selector))
-                )
-            except (TimeoutException, NoSuchElementException):
-                continue
-        return None
+        def any_present(driver):
+            for by, selector in selectors:
+                try:
+                    els = driver.find_elements(by, selector)
+                    if els:
+                        return els[0]
+                except Exception:
+                    continue
+            return None
+
+        try:
+            WebDriverWait(self.driver, timeout).until(
+                lambda d: any_present(d) is not None
+            )
+            return any_present(self.driver)
+        except TimeoutException:
+            return None
 
     def _find_clickable(self, selectors, timeout=10):
         """
-        Try each (By, selector) pair and return the first clickable element.
+        Scan ALL selectors in parallel within a single WebDriverWait.
+        Returns the first visible and enabled element found within timeout seconds.
+        Much faster than sequential per-selector waits.
 
         Args:
             selectors: list of (By, selector_string) tuples
-            timeout (int): per-selector wait in seconds
+            timeout (int): total wait in seconds across ALL selectors
 
         Returns:
             WebElement or None
         """
-        for by, selector in selectors:
-            try:
-                return WebDriverWait(self.driver, timeout).until(
-                    EC.element_to_be_clickable((by, selector))
-                )
-            except (TimeoutException, NoSuchElementException):
-                continue
-        return None
+        def any_clickable(driver):
+            for by, selector in selectors:
+                try:
+                    els = driver.find_elements(by, selector)
+                    if els and els[0].is_displayed() and els[0].is_enabled():
+                        return els[0]
+                except Exception:
+                    continue
+            return None
+
+        try:
+            WebDriverWait(self.driver, timeout).until(
+                lambda d: any_clickable(d) is not None
+            )
+            return any_clickable(self.driver)
+        except TimeoutException:
+            return None
 
     def _any_element_present(self, selectors):
         """Non-blocking check: return True if any selector matches in the DOM."""
@@ -176,8 +198,65 @@ class MeetAutomation:
                 continue
         return False
 
+    def _wait_for_buttons_interactive(self, timeout=20):
+        """
+        Wait until BOTH mic and camera buttons are:
+        - Present in the DOM
+        - Visible on screen
+        - Enabled (not disabled)
+        Returns True if ready, False if timed out.
+        """
+        def both_buttons_ready(driver):
+            try:
+                # Check mic button
+                mic_btn = None
+                for by, selector in _MIC_SELECTORS:
+                    try:
+                        els = driver.find_elements(by, selector)
+                        if els:
+                            mic_btn = els[0]
+                            break
+                    except Exception:
+                        continue
+
+                # Check camera button
+                cam_btn = None
+                for by, selector in _CAMERA_SELECTORS:
+                    try:
+                        els = driver.find_elements(by, selector)
+                        if els:
+                            cam_btn = els[0]
+                            break
+                    except Exception:
+                        continue
+
+                if not mic_btn or not cam_btn:
+                    return False
+
+                # Both must be visible and enabled
+                return (
+                    mic_btn.is_displayed()
+                    and mic_btn.is_enabled()
+                    and cam_btn.is_displayed()
+                    and cam_btn.is_enabled()
+                )
+            except Exception:
+                return False
+
+        try:
+            WebDriverWait(self.driver, timeout).until(both_buttons_ready)
+            logger.info(f"{Fore.GREEN}✓ Mic and camera buttons are ready{Style.RESET_ALL}")
+            return True
+        except TimeoutException:
+            logger.warning(f"{Fore.YELLOW}⚠ Buttons did not become interactive in time{Style.RESET_ALL}")
+            self._save_debug_screenshot("buttons_not_ready")
+            return False
+
     def _wait_for_prejoin_screen(self, timeout=30):
-        """Wait until any pre-join element becomes visible — single combined wait."""
+        """
+        Wait until the pre-join screen is fully stable —
+        any pre-join element is visible AND the page stops changing.
+        """
         def any_visible(driver):
             for by, selector in _PREJOIN_READY_SELECTORS:
                 try:
@@ -188,12 +267,26 @@ class MeetAutomation:
                     continue
             return False
 
+        def page_is_stable(driver):
+            """Check DOM is stable by comparing page source length twice."""
+            try:
+                first = driver.execute_script("return document.body.innerHTML.length")
+                time.sleep(0.5)
+                second = driver.execute_script("return document.body.innerHTML.length")
+                return first == second
+            except Exception:
+                return False
+
         try:
+            # Step 1: Wait for any pre-join element to appear
             WebDriverWait(self.driver, timeout).until(any_visible)
-            # Extra settle time for slower machines — elements may be in DOM
-            # but animations/overlays haven't finished yet
-            time.sleep(2)
+            logger.info(f"{Fore.GREEN}✓ Pre-join screen detected{Style.RESET_ALL}")
+
+            # Step 2: Wait for DOM to stop changing (page fully rendered)
+            WebDriverWait(self.driver, 10).until(page_is_stable)
+            logger.info(f"{Fore.GREEN}✓ Pre-join screen stable{Style.RESET_ALL}")
             return True
+
         except TimeoutException:
             return False
 
@@ -250,7 +343,7 @@ class MeetAutomation:
             btn = self._find_element(_MIC_SELECTORS, timeout=5)
             if btn is None:
                 logger.warning(f"{Fore.YELLOW}Mic button not found in DOM{Style.RESET_ALL}")
-                return None  # Unknown — button not found
+                return None
 
             # Strategy 1: data-is-muted attribute (best — language-independent)
             data_is_muted = btn.get_attribute("data-is-muted")
@@ -259,12 +352,12 @@ class MeetAutomation:
                 logger.debug(f"Mic status via data-is-muted: {'ON' if is_on else 'OFF'}")
                 return is_on
 
-            # Strategy 2: aria-label (covers most English-locale Chrome)
+            # Strategy 2: aria-label
             aria_label = (btn.get_attribute("aria-label") or "").lower()
             if "turn on" in aria_label or "unmute" in aria_label:
-                return False  # Currently OFF (label says "turn on")
+                return False
             if "turn off" in aria_label or "mute" in aria_label:
-                return True   # Currently ON (label says "turn off")
+                return True
 
             # Strategy 3: data-tooltip
             data_tooltip = (btn.get_attribute("data-tooltip") or "").lower()
@@ -286,34 +379,37 @@ class MeetAutomation:
         """
         Return True if camera is currently ON, False if off.
 
-        Uses multiple detection strategies for cross-system reliability.
+        Uses multiple detection strategies for cross-system reliability:
+        1. data-is-muted attribute (language-independent, most reliable)
+        2. aria-label substring check
+        3. data-tooltip substring check
         """
         try:
             btn = self._find_element(_CAMERA_SELECTORS, timeout=5)
             if btn is None:
-                logger.warning(f"{Fore.YELLOW}Camera button not found in DOM{Style.RESET_ALL}")
-                return None  # Unknown
+                return None
 
-            # Strategy 1: aria-label
+            # Strategy 1: data-is-muted attribute (most reliable)
+            data_is_muted = btn.get_attribute("data-is-muted")
+            if data_is_muted is not None:
+                return data_is_muted.lower() == "false"
+
+            # Strategy 2: aria-label
             aria_label = (btn.get_attribute("aria-label") or "").lower()
             if "turn on" in aria_label:
                 return False
             if "turn off" in aria_label:
                 return True
 
-            # Strategy 2: data-tooltip
+            # Strategy 3: data-tooltip
             data_tooltip = (btn.get_attribute("data-tooltip") or "").lower()
             if "turn on" in data_tooltip:
                 return False
             if "turn off" in data_tooltip:
                 return True
 
-            # Fallback: assume camera is ON
-            logger.warning(f"{Fore.YELLOW}Could not determine camera state, assuming ON{Style.RESET_ALL}")
+            logger.warning("Could not determine camera state, assuming ON")
             return True
-
-        except (StaleElementReferenceException, WebDriverException):
-            return None
         except Exception:
             return None
 
@@ -325,19 +421,32 @@ class MeetAutomation:
         """
         Toggle the microphone button.
         Falls back to keyboard shortcut (Ctrl+D) if button click fails.
+        Waits for state change confirmation after each strategy.
         """
+        state_before = self._get_mic_status()
+
         # Strategy 1: Click the button
         btn = self._find_clickable(_MIC_SELECTORS, timeout=5)
         if btn:
             self._safe_click(btn)
-            time.sleep(0.5)
+            try:
+                WebDriverWait(self.driver, 3).until(
+                    lambda d: self._get_mic_status() != state_before
+                )
+            except TimeoutException:
+                pass
             return True
 
-        # Strategy 2: Keyboard shortcut Ctrl+D (Google Meet mic toggle)
+        # Strategy 2: Keyboard shortcut Ctrl+D
         logger.info(f"{Fore.YELLOW}Mic button not clickable, trying Ctrl+D shortcut{Style.RESET_ALL}")
         try:
             ActionChains(self.driver).key_down(Keys.CONTROL).send_keys('d').key_up(Keys.CONTROL).perform()
-            time.sleep(0.5)
+            try:
+                WebDriverWait(self.driver, 3).until(
+                    lambda d: self._get_mic_status() != state_before
+                )
+            except TimeoutException:
+                pass
             return True
         except Exception as e:
             logger.warning(f"{Fore.YELLOW}Keyboard shortcut failed: {e}{Style.RESET_ALL}")
@@ -352,7 +461,12 @@ class MeetAutomation:
             """
             result = self.driver.execute_script(script)
             if result:
-                time.sleep(0.5)
+                try:
+                    WebDriverWait(self.driver, 3).until(
+                        lambda d: self._get_mic_status() != state_before
+                    )
+                except TimeoutException:
+                    pass
                 return True
         except Exception:
             pass
@@ -364,19 +478,32 @@ class MeetAutomation:
         """
         Toggle the camera button.
         Falls back to keyboard shortcut (Ctrl+E) if button click fails.
+        Waits for state change confirmation after each strategy.
         """
+        state_before = self._get_camera_status()
+
         # Strategy 1: Click the button
         btn = self._find_clickable(_CAMERA_SELECTORS, timeout=5)
         if btn:
             self._safe_click(btn)
-            time.sleep(0.5)
+            try:
+                WebDriverWait(self.driver, 3).until(
+                    lambda d: self._get_camera_status() != state_before
+                )
+            except TimeoutException:
+                pass
             return True
 
-        # Strategy 2: Keyboard shortcut Ctrl+E (Google Meet camera toggle)
+        # Strategy 2: Keyboard shortcut Ctrl+E
         logger.info(f"{Fore.YELLOW}Camera button not clickable, trying Ctrl+E shortcut{Style.RESET_ALL}")
         try:
             ActionChains(self.driver).key_down(Keys.CONTROL).send_keys('e').key_up(Keys.CONTROL).perform()
-            time.sleep(0.5)
+            try:
+                WebDriverWait(self.driver, 3).until(
+                    lambda d: self._get_camera_status() != state_before
+                )
+            except TimeoutException:
+                pass
             return True
         except Exception as e:
             logger.warning(f"{Fore.YELLOW}Keyboard shortcut failed: {e}{Style.RESET_ALL}")
@@ -391,7 +518,12 @@ class MeetAutomation:
             """
             result = self.driver.execute_script(script)
             if result:
-                time.sleep(0.5)
+                try:
+                    WebDriverWait(self.driver, 3).until(
+                        lambda d: self._get_camera_status() != state_before
+                    )
+                except TimeoutException:
+                    pass
                 return True
         except Exception:
             pass
@@ -406,6 +538,7 @@ class MeetAutomation:
     def join_meeting(self, meet_link, microphone_on=False, camera_on=False):
         """
         Join a Google Meet meeting with specified audio/video settings.
+        Retries up to 2 times if the first attempt fails.
 
         Args:
             meet_link (str): Google Meet URL
@@ -422,32 +555,38 @@ class MeetAutomation:
                 logger.error(f"{Fore.RED}✗ Invalid Google Meet link{Style.RESET_ALL}")
                 return False
 
-            self.driver.get(meet_link)
+            # Retry joining up to 2 times if first attempt fails
+            for join_attempt in range(1, 3):
+                logger.info(f"{Fore.CYAN}Join attempt {join_attempt}/2...{Style.RESET_ALL}")
 
-            # Wait for the pre-join lobby to render instead of a blind sleep
-            if not self._wait_for_prejoin_screen():
-                logger.warning(f"{Fore.YELLOW}⚠ Pre-join screen took too long to load{Style.RESET_ALL}")
-                self._save_debug_screenshot("prejoin_timeout")
+                self.driver.get(meet_link)
 
-            self._check_meeting_status()
-            self._dismiss_popups()
-            self._set_audio_video(microphone_on, camera_on)
+                if not self._wait_for_prejoin_screen():
+                    logger.warning(f"{Fore.YELLOW}⚠ Pre-join screen took too long{Style.RESET_ALL}")
+                    self._save_debug_screenshot(f"prejoin_timeout_attempt{join_attempt}")
+                    continue  # retry
 
-            if not self._is_session_alive():
-                logger.error(
-                    f"{Fore.RED}✗ Chrome session died (likely caused by profile conflict — "
-                    f"close all Chrome windows before running){Style.RESET_ALL}"
-                )
-                return False
+                self._check_meeting_status()
+                self._dismiss_popups()
+                self._set_audio_video(microphone_on, camera_on)
 
-            if self._click_join_button():
-                with self._joined_lock:
-                    self.meeting_joined = True
-                logger.info(f"{Fore.GREEN}✓ Successfully joined the meeting{Style.RESET_ALL}")
-                return True
+                if not self._is_session_alive():
+                    logger.error(
+                        f"{Fore.RED}✗ Chrome session died (likely caused by profile conflict — "
+                        f"close all Chrome windows before running){Style.RESET_ALL}"
+                    )
+                    return False
 
-            logger.error(f"{Fore.RED}✗ Failed to join the meeting{Style.RESET_ALL}")
-            self._save_debug_screenshot("join_failed")
+                if self._click_join_button():
+                    with self._joined_lock:
+                        self.meeting_joined = True
+                    logger.info(f"{Fore.GREEN}✓ Successfully joined the meeting{Style.RESET_ALL}")
+                    return True
+
+                logger.warning(f"{Fore.YELLOW}⚠ Join attempt {join_attempt} failed, retrying...{Style.RESET_ALL}")
+                self._save_debug_screenshot(f"join_failed_attempt{join_attempt}")
+
+            logger.error(f"{Fore.RED}✗ Failed to join after 2 attempts{Style.RESET_ALL}")
             return False
 
         except Exception as e:
@@ -502,8 +641,9 @@ class MeetAutomation:
                 logger.warning(f"{Fore.YELLOW}⚠ Media controls did not appear in time{Style.RESET_ALL}")
                 self._save_debug_screenshot("no_media_controls")
 
-            # Extra settle time for the controls to become fully interactive
-            time.sleep(1)
+            # Wait for buttons to be truly interactive
+            if not self._wait_for_buttons_interactive(timeout=20):
+                logger.warning(f"{Fore.YELLOW}⚠ Proceeding despite buttons not confirmed ready{Style.RESET_ALL}")
 
             # --- Microphone ---
             self._set_mic_state(microphone_on)
@@ -512,7 +652,6 @@ class MeetAutomation:
             self._set_camera_state(camera_on)
 
         except (InvalidSessionIdException, WebDriverException):
-            # Session is unrecoverable — propagate so join_meeting can abort
             raise
         except Exception as e:
             logger.warning(f"{Fore.YELLOW}Could not set audio/video: {str(e)}{Style.RESET_ALL}")
@@ -528,12 +667,13 @@ class MeetAutomation:
             current = self._get_mic_status()
 
             if current is None:
-                logger.warning(
-                    f"{Fore.YELLOW}Mic status unknown (attempt {attempt}/{_TOGGLE_MAX_RETRIES}), "
-                    f"attempting toggle anyway{Style.RESET_ALL}"
-                )
-                self._toggle_microphone()
-                time.sleep(1)
+                logger.warning(f"Mic status unknown on attempt {attempt}, skipping toggle")
+                try:
+                    WebDriverWait(self.driver, 5).until(
+                        lambda d: self._get_mic_status() is not None
+                    )
+                except TimeoutException:
+                    pass
                 continue
 
             if current == desired_on:
@@ -541,16 +681,20 @@ class MeetAutomation:
                 logger.info(f"{Fore.GREEN}✓ Microphone already {state_label}{Style.RESET_ALL}")
                 return True
 
-            # Current state doesn't match desired — toggle
             logger.info(
                 f"{Fore.CYAN}Toggling microphone from "
                 f"{'ON' if current else 'OFF'} → {'ON' if desired_on else 'OFF'} "
                 f"(attempt {attempt}/{_TOGGLE_MAX_RETRIES}){Style.RESET_ALL}"
             )
             self._toggle_microphone()
-            time.sleep(1)  # Wait for state to settle
 
-            # Verify the toggle worked
+            try:
+                WebDriverWait(self.driver, 5).until(
+                    lambda d: self._get_mic_status() != current
+                )
+            except TimeoutException:
+                pass
+
             new_status = self._get_mic_status()
             if new_status == desired_on:
                 logger.info(f"{Fore.GREEN}✓ Microphone set to {'ON' if desired_on else 'OFF'}{Style.RESET_ALL}")
@@ -573,12 +717,13 @@ class MeetAutomation:
             current = self._get_camera_status()
 
             if current is None:
-                logger.warning(
-                    f"{Fore.YELLOW}Camera status unknown (attempt {attempt}/{_TOGGLE_MAX_RETRIES}), "
-                    f"attempting toggle anyway{Style.RESET_ALL}"
-                )
-                self._toggle_camera()
-                time.sleep(1)
+                logger.warning(f"Camera status unknown on attempt {attempt}, skipping toggle")
+                try:
+                    WebDriverWait(self.driver, 5).until(
+                        lambda d: self._get_camera_status() is not None
+                    )
+                except TimeoutException:
+                    pass
                 continue
 
             if current == desired_on:
@@ -592,7 +737,13 @@ class MeetAutomation:
                 f"(attempt {attempt}/{_TOGGLE_MAX_RETRIES}){Style.RESET_ALL}"
             )
             self._toggle_camera()
-            time.sleep(1)
+
+            try:
+                WebDriverWait(self.driver, 5).until(
+                    lambda d: self._get_camera_status() != current
+                )
+            except TimeoutException:
+                pass
 
             new_status = self._get_camera_status()
             if new_status == desired_on:
@@ -631,11 +782,9 @@ class MeetAutomation:
         script = """
         const labels = ['Join now', 'Ask to join', 'Join'];
         for (const label of labels) {
-            // Direct button text match
             const btns = Array.from(document.querySelectorAll('button'));
             const btn = btns.find(b => (b.innerText || '').trim() === label);
             if (btn) return btn;
-            // Button containing a span with that text
             const spans = Array.from(document.querySelectorAll('button span'));
             const span = spans.find(s => (s.innerText || '').trim() === label);
             if (span) return span.closest('button');
@@ -650,34 +799,54 @@ class MeetAutomation:
     def _click_join_button(self):
         """
         Click the join / ask-to-join button.
+        Scans ALL selectors in parallel (single WebDriverWait),
+        then confirms entry by waiting for the leave button to appear.
 
         Returns:
-            bool: True if button found and clicked
+            bool: True if button found, clicked, AND entry confirmed
         """
         try:
-            # Use a short per-selector timeout (2 s) so we cycle through all
-            # candidates quickly rather than blocking for 10 s on each one.
-            btn = self._find_clickable(_JOIN_SELECTORS, timeout=2)
+            def any_join_button_ready(driver):
+                for by, selector in _JOIN_SELECTORS:
+                    try:
+                        els = driver.find_elements(by, selector)
+                        if els and els[0].is_displayed() and els[0].is_enabled():
+                            return els[0]
+                    except Exception:
+                        continue
+                return None
 
+            btn = None
+            try:
+                # Wait up to 10s total for ANY join button to become ready
+                WebDriverWait(self.driver, 10).until(
+                    lambda d: any_join_button_ready(d) is not None
+                )
+                btn = any_join_button_ready(self.driver)
+            except TimeoutException:
+                logger.warning(f"{Fore.YELLOW}Join button not found via selectors{Style.RESET_ALL}")
+
+            # Fallback: JS text search
             if btn is None:
-                # Selector bank missed — try JS text search as last resort
                 btn = self._find_join_button_js()
                 if btn is None:
                     logger.error(f"{Fore.RED}✗ Could not find join button{Style.RESET_ALL}")
                     return False
 
-            # Try a normal click first; fall back to JS click if an overlay
-            # or animation intercepts the event.
             self._safe_click(btn)
-
             logger.info(f"{Fore.GREEN}✓ Join button clicked{Style.RESET_ALL}")
-            # Wait for the leave button to appear (confirms we entered the meeting)
+
+            # Confirm we actually entered the meeting by waiting for leave button
             try:
                 WebDriverWait(self.driver, 15).until(
                     lambda d: self._any_element_present(_LEAVE_SELECTORS)
                 )
+                logger.info(f"{Fore.GREEN}✓ Confirmed inside meeting{Style.RESET_ALL}")
             except TimeoutException:
-                pass  # proceed anyway — join was clicked successfully
+                logger.error(f"{Fore.RED}✗ Join clicked but never entered meeting{Style.RESET_ALL}")
+                self._save_debug_screenshot("join_not_confirmed")
+                return False
+
             return True
 
         except Exception as e:
@@ -699,13 +868,14 @@ class MeetAutomation:
 
             logger.info(f"{Fore.CYAN}Leaving the meeting...{Style.RESET_ALL}")
 
+            # Use parallel scan for leave button (fast, not sequential)
             btn = self._find_clickable(_LEAVE_SELECTORS, timeout=10)
             if btn:
                 self._safe_click(btn)
                 logger.info(f"{Fore.GREEN}✓ Successfully left the meeting{Style.RESET_ALL}")
                 with self._joined_lock:
                     self.meeting_joined = False
-                # Wait for post-leave indicators (goodbye / rejoin screen)
+                # Wait for post-leave indicators
                 try:
                     WebDriverWait(self.driver, 5).until(
                         lambda d: self._any_element_present(_GOODBYE_SELECTORS)
