@@ -106,10 +106,11 @@ Automatic Google Meet System using Selenium in Python/
 4. **Verify your system with Pre-Flight Check**
 
    This system includes a diagnostic script to verify everything is set up correctly (Python version, dependencies, Chrome installation, `.env` structure, and OS privacy settings).
-   
+
    ```bash
    python preflight_check.py
    ```
+
    **Do not proceed unless all checks pass!**
 
 5. **Configure credentials**
@@ -139,7 +140,7 @@ Automatic Google Meet System using Selenium in Python/
    USE_FAKE_MEDIA_DEVICE=True
    ```
 
-5. **Configure meetings** (optional, for scheduled mode)
+6. **Configure meetings** (optional, for scheduled mode)
 
    ```bash
    # Windows
@@ -328,7 +329,7 @@ Options:
 **Issue**: Microphone/camera toggles fail or buttons don't appear
 
 - **Solution 1 (The easy fix)**: Set `USE_FAKE_MEDIA_DEVICE=True` in your `.env`. This forces a synthetic audio/video device, ensuring the Meet buttons always render and click properly, even on PCs with strict privacy settings or no hardware. NOTE: You will not be able to manually unmute and talk with this enabled (the fake device will send a test tone).
-- **Solution 2 (If you need real hardware)**: Check Windows Settings → Privacy & Security → Camera & Microphone. Ensure "Let desktop apps access your camera/microphone" is toggled **ON**. 
+- **Solution 2 (If you need real hardware)**: Check Windows Settings → Privacy & Security → Camera & Microphone. Ensure "Let desktop apps access your camera/microphone" is toggled **ON**.
 
 **Issue**: `venv\Scripts\activate` is blocked on PowerShell
 
@@ -384,3 +385,56 @@ For issues, questions, or suggestions:
 ---
 
 **Made with ❤️ for automating the boring stuff**
+Env
+
+# Google Account Credentials
+
+GOOGLE_EMAIL=
+GOOGLE_PASSWORD=
+
+# Browser Settings (chrome, firefox, edge)
+
+BROWSER_TYPE=chrome
+HEADLESS_MODE=False
+
+# Chrome Profile Settings (optional, for reusing sessions)
+
+# IMPORTANT: Point to the "User Data" parent directory, NOT the profile subfolder.
+
+# The profile subfolder is set via CHROME_PROFILE_DIRECTORY below.
+
+# Example (Windows): C:\Users\<YourUsername>\AppData\Local\Google\Chrome\User Data
+
+CHROME_USER_DATA_DIR=
+CHROME_PROFILE_DIRECTORY=Default
+
+# Join recovery settings
+
+JOIN_RETRIES=2
+JOIN_RETRY_DELAY_SECONDS=3
+
+# Meeting Defaults
+
+AUTO_LEAVE_DURATION=3600
+MICROPHONE_ON=False
+CAMERA_ON=False
+
+# Fake Media Device (cross-system compatibility)
+
+# True = Uses a synthetic test device. Mic/camera buttons ALWAYS appear,
+
+# even on PCs without hardware. But you CANNOT use real mic/camera.
+
+# False = Uses your REAL microphone and camera. You can unmute and talk
+
+# during the meeting. But on PCs without hardware, the mic/camera
+
+# buttons may not appear and toggle will fail.
+
+#
+
+# Recommendation: Set to True if you just need silent attendance.
+
+# Set to False if you need to speak/show video during meetings.
+
+USE_FAKE_MEDIA_DEVICE=False
